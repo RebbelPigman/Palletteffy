@@ -130,26 +130,126 @@ def _colour_distance(src_ok, pal_ok):
     )
 
 
-def closest_colour(pixel, palette, palette_oklch=None):
+def closest_colour(pixel, palette, palette_oklch=None, used=None):
     src_ok = _oklch(pixel[:3])
     if palette_oklch is None:
         palette_oklch = [_oklch(c) for c in palette]
     best = palette[0]
     best_d = None
-    for colour, pal_ok in zip(palette, palette_oklch):
+    for i, (colour, pal_ok) in enumerate(zip(palette, palette_oklch)):
+        if used is not None and used[i]:
+            continue
         d = _colour_distance(src_ok, pal_ok)
         if best_d is None or d < best_d:
             best_d = d
             best = colour
+    if best_d is None and used is not None:
+        return closest_colour(pixel, palette, palette_oklch, used=None)
     return best
+
+
+# Merge source colours closer than this into one in-picture group.
+_CLUSTER_MERGE = 0.012
+# A small group keeps its own slot if it is farther than this from every major.
+_CLUSTER_DISTINCT = 0.045
+# Groups below this share of pixels fold into a nearby major, unless distinct.
+_CLUSTER_MINOR = 0.002
+
+
+def _cluster_image_colours(im):
+    """Group the picture's own colours: near-duplicates merge, real flats stay apart."""
+    w, h = im.size
+    total = w * h
+    listed = im.getcolors(total)
+    if not listed:
+        return [], total
+    items = sorted(((n, rgb) for n, rgb in listed), reverse=True)
+    clusters = []
+    for n, rgb in items:
+        rgb = rgb[:3]
+        ok = _oklch(rgb)
+        best_i = None
+        best_d = None
+        for i, cl in enumerate(clusters):
+            d = _colour_distance(ok, cl["ok"])
+            if best_d is None or d < best_d:
+                best_d = d
+                best_i = i
+        if best_d is not None and best_d < _CLUSTER_MERGE:
+            cl = clusters[best_i]
+            cl["count"] += n
+            cl["members"][rgb] = cl["members"].get(rgb, 0) + n
+        else:
+            clusters.append(
+                {"rep": rgb, "ok": ok, "count": n, "members": {rgb: n}}
+            )
+
+    floor = max(32, int(_CLUSTER_MINOR * total))
+    majors = [cl for cl in clusters if cl["count"] >= floor]
+    minors = [cl for cl in clusters if cl["count"] < floor]
+    if not majors:
+        majors, minors = clusters, []
+
+    kept = []
+    absorbed = []
+    for cl in minors:
+        dmin = min(_colour_distance(cl["ok"], m["ok"]) for m in majors)
+        if dmin > _CLUSTER_DISTINCT:
+            kept.append(cl)
+        else:
+            absorbed.append(cl)
+    majors.extend(kept)
+    for cl in absorbed:
+        nearest = min(majors, key=lambda m: _colour_distance(cl["ok"], m["ok"]))
+        nearest["count"] += cl["count"]
+        for rgb, n in cl["members"].items():
+            nearest["members"][rgb] = nearest["members"].get(rgb, 0) + n
+    majors.sort(key=lambda cl: -cl["count"])
+    return majors, total
+
+
+def _assign_groups_to_palette(groups, palette, palette_oklch):
+    """Give each in-picture group its own palette slot while slots last.
+
+    Larger flats choose first, so one popular palette colour cannot take
+    every group that happens to be nearest to it.
+    """
+    used = [False] * len(palette)
+    for cl in groups:
+        best_i = None
+        best_d = None
+        for i, pal_ok in enumerate(palette_oklch):
+            if used[i]:
+                continue
+            d = _colour_distance(cl["ok"], pal_ok)
+            if best_d is None or d < best_d:
+                best_d = d
+                best_i = i
+        if best_i is None:
+            best_i = min(
+                range(len(palette)),
+                key=lambda i: _colour_distance(cl["ok"], palette_oklch[i]),
+            )
+        else:
+            used[best_i] = True
+        cl["pal"] = palette[best_i]
 
 
 def palettize(im, palette):
     im = im.convert("RGB")
     palette_oklch = [_oklch(c) for c in palette]
-    cache = {}
+    groups, _total = _cluster_image_colours(im)
+    lut = {}
+    if groups:
+        _assign_groups_to_palette(groups, palette, palette_oklch)
+        for cl in groups:
+            dest = cl["pal"]
+            for rgb in cl["members"]:
+                lut[rgb] = dest
+
     pixels = im.load()
     w, h = im.size
+    cache = dict(lut)
     for y in range(h):
         for x in range(w):
             src = pixels[x, y]

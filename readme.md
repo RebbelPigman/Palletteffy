@@ -1,6 +1,6 @@
 # Palletteffy
 
-A small PyQt5 app that remaps every pixel of an image to the nearest colour in a user-defined palette. The default set is the classic 16-colour CGA/EGA palette.
+A small PyQt5 app that remaps every pixel of an image to the nearest colour in a user-defined palette. The default set is a 16-colour dark theme palette.
 
 The UI follows system Qt5 settings: widget style, fonts, and colours come from the desktop (qt5ct, KDE, or the GTK platform theme). No Fusion/style override is applied.
 
@@ -38,8 +38,8 @@ Leave `QT_STYLE_OVERRIDE` unset so the desktop theme applies.
 ## Usage
 
 1. **Load image** — PNG, JPEG, BMP, WebP, GIF, TIFF.
-2. Edit the **Palette** box if you do not want the default CGA/EGA set.
-3. **Palettize** — each pixel is replaced by the closest RGB colour in the current palette (squared Euclidean distance).
+2. Edit the **Palette** box if you do not want the default set.
+3. **Palettize** — the picture’s own colours are grouped first, then each group claims a different palette slot (largest flats first, OKLCH hue/chroma distance). That stops one palette colour from swallowing every nearby region.
 4. **Save result** — writes a PNG.
 
 Large images are processed in a nested Python loop, so expect a wait on big photos. The cursor switches to a wait cursor while that runs.
@@ -52,28 +52,28 @@ Colours go in the text area, one per line. Accepted forms:
 - `#rgb` — e.g. `#f80` → `#ff8800`
 - `R,G,B` or `rgb(R, G, B)` — components 0–255
 
-`// comments` on a line are ignored. Duplicates are dropped. The swatch row under the editor shows the parsed colours. **Reset palette** restores the default CGA/EGA set.
+`// comments` on a line are ignored. Duplicates are dropped. The swatch row under the editor shows the parsed colours. **Reset palette** restores the default set.
 
-Default set (CGA / EGA):
+Default set:
 
-| Colour        | Hex     | RGB            |
-|---------------|---------|----------------|
-| black         | #000000 | 0, 0, 0        |
-| blue          | #0000aa | 0, 0, 170      |
-| green         | #00aa00 | 0, 170, 0      |
-| cyan          | #00aaaa | 0, 170, 170    |
-| red           | #aa0000 | 170, 0, 0      |
-| magenta       | #aa00aa | 170, 0, 170    |
-| brown         | #aa5500 | 170, 85, 0     |
-| light gray    | #aaaaaa | 170, 170, 170  |
-| dark gray     | #555555 | 85, 85, 85     |
-| light blue    | #5555ff | 85, 85, 255    |
-| light green   | #55ff55 | 85, 255, 85    |
-| light cyan    | #55ffff | 85, 255, 255   |
-| light red     | #ff5555 | 255, 85, 85    |
-| light magenta | #ff55ff | 255, 85, 255   |
-| yellow        | #ffff55 | 255, 255, 85   |
-| white         | #ffffff | 255, 255, 255  |
+| # | Hex     | RGB             | Group          |
+|---|---------|-----------------|----------------|
+| 1 | #11111b | 17, 17, 27      | dark           |
+| 2 | #1e1e2e | 30, 30, 46      | dark           |
+| 3 | #cdd6f4 | 205, 214, 244   | paper          |
+| 4 | #b38465 | 179, 132, 101   | brown          |
+| 5 | #f38ba8 | 243, 139, 168   | pink           |
+| 6 | #d16c89 | 209, 108, 137   | pink (dark)    |
+| 7 | #fab387 | 250, 179, 135   | peach          |
+| 8 | #d89468 | 216, 148, 104   | peach (dark)   |
+| 9 | #f9e2af | 249, 226, 175   | yellow         |
+| 10 | #d8c190 | 216, 193, 144  | yellow (dark)  |
+| 11 | #a6e3a1 | 166, 227, 161  | green          |
+| 12 | #87c282 | 135, 194, 130  | green (dark)   |
+| 13 | #89dceb | 137, 220, 235  | sky            |
+| 14 | #89b4fa | 137, 180, 250  | blue           |
+| 15 | #cba6f7 | 203, 166, 247  | mauve          |
+| 16 | #ab87d5 | 171, 135, 213  | mauve (dark)   |
 
 ## Files
 
