@@ -6,16 +6,19 @@ import os
 import re
 import sys
 
-from PIL import Image
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QImage, QPixmap
+from PIL import Image, ImageFilter
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QColor, QCursor, QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QColorDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -24,24 +27,34 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-# Default 16-colour palette, shown as hex in the editor.
+# Default palette: Catppuccin Mocha (official names as comments).
 DEFAULT_PALETTE_TEXT = """\
-#11111b
-#1e1e2e
-#cdd6f4
-#b38465
-#f38ba8
-#d16c89
-#fab387
-#d89468
-#f9e2af
-#d8c190
-#a6e3a1
-#87c282
-#89dceb
-#89b4fa
-#cba6f7
-#ab87d5
+#11111b // crust
+#181825 // mantle
+#1e1e2e // base
+#313244 // surface0
+#45475a // surface1
+#585b70 // surface2
+#6c7086 // overlay0
+#7f849c // overlay1
+#9399b2 // overlay2
+#a6adc8 // subtext0
+#bac2de // subtext1
+#cdd6f4 // text
+#f5e0dc // rosewater
+#f2cdcd // flamingo
+#f5c2e7 // pink
+#cba6f7 // mauve
+#f38ba8 // red
+#eba0ac // maroon
+#fab387 // peach
+#f9e2af // yellow
+#a6e3a1 // green
+#94e2d5 // teal
+#89dceb // sky
+#74c7ec // sapphire
+#89b4fa // blue
+#b4befe // lavender
 """
 
 PICTURES_DIR = os.path.expanduser("~/Pictures")
@@ -80,6 +93,45 @@ def parse_palette(text):
             seen.add(rgb)
             colours.append(rgb)
     return colours
+
+
+def _line_has_colour(line):
+    candidate = line.split("//", 1)[0].strip()
+    if not candidate:
+        return False
+    if _HEX.search(candidate):
+        return True
+    m = _RGB.search(candidate)
+    return bool(m) and all(int(x) <= 255 for x in m.groups())
+
+
+def rewrite_palette_colour(text, index, new_rgb=None):
+    """Replace or delete the index-th colour line. None deletes it."""
+    lines = text.splitlines(True)
+    found = 0
+    out = []
+    for line in lines:
+        if not _line_has_colour(line):
+            out.append(line)
+            continue
+        if found != index:
+            out.append(line)
+            found += 1
+            continue
+        found += 1
+        if new_rgb is None:
+            continue
+        hex_ = "#{:02x}{:02x}{:02x}".format(*new_rgb)
+        nl = "\n" if line.endswith("\n") else ""
+        if "//" in line:
+            comment = line.split("//", 1)[1]
+            if comment.endswith("\n"):
+                comment = comment[:-1]
+                nl = "\n"
+            out.append("{} //{}\n".format(hex_, comment) if nl else "{} //{}".format(hex_, comment))
+        else:
+            out.append(hex_ + nl)
+    return "".join(out)
 
 
 def _srgb_to_oklab(rgb):
@@ -235,8 +287,33 @@ def _assign_groups_to_palette(groups, palette, palette_oklch):
         cl["pal"] = palette[best_i]
 
 
-def palettize(im, palette):
+def _resnap_to_palette(im, palette, palette_oklch):
+    pixels = im.load()
+    w, h = im.size
+    cache = {}
+    for y in range(h):
+        for x in range(w):
+            src = pixels[x, y]
+            mapped = cache.get(src)
+            if mapped is None:
+                mapped = closest_colour(src, palette, palette_oklch)
+                cache[src] = mapped
+            pixels[x, y] = mapped
+    return im
+
+
+def _soften_in_palette(im, palette, palette_oklch):
+    """Knock out speckles and round jagged flats, then snap back to the palette."""
+    im = im.filter(ImageFilter.MedianFilter(size=3))
+    im = _resnap_to_palette(im, palette, palette_oklch)
+    im = im.filter(ImageFilter.GaussianBlur(radius=0.7))
+    return _resnap_to_palette(im, palette, palette_oklch)
+
+
+def palettize(im, palette, smooth=True):
     im = im.convert("RGB")
+    if smooth:
+        im = im.filter(ImageFilter.GaussianBlur(radius=0.55))
     palette_oklch = [_oklch(c) for c in palette]
     groups, _total = _cluster_image_colours(im)
     lut = {}
@@ -258,6 +335,8 @@ def palettize(im, palette):
                 mapped = closest_colour(src, palette, palette_oklch)
                 cache[src] = mapped
             pixels[x, y] = mapped
+    if smooth:
+        im = _soften_in_palette(im, palette, palette_oklch)
     return im
 
 
@@ -269,13 +348,56 @@ def pil_to_pixmap(im):
     return QPixmap.fromImage(qim)
 
 
+class SwatchChip(QFrame):
+    edit_requested = pyqtSignal(int)
+    remove_requested = pyqtSignal(int)
+
+    def __init__(self, index, rgb, parent=None):
+        super().__init__(parent)
+        self._index = index
+        r, g, b = rgb
+        self.setFixedHeight(22)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setCursor(QCursor(Qt.PointingHandCursor))
+        self.setToolTip(
+            "#{:02x}{:02x}{:02x}  ({}, {}, {})\n"
+            "Left-click to edit · right-click to remove".format(r, g, b, r, g, b)
+        )
+        self.setStyleSheet(
+            "background-color: rgb({},{},{}); border: 1px solid rgba(0,0,0,80);".format(
+                r, g, b
+            )
+        )
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.edit_requested.emit(self._index)
+            event.accept()
+            return
+        if event.button() == Qt.RightButton:
+            menu = QMenu(self)
+            act_edit = menu.addAction("Edit colour…")
+            act_remove = menu.addAction("Remove colour")
+            chosen = menu.exec_(event.globalPos())
+            if chosen is act_edit:
+                self.edit_requested.emit(self._index)
+            elif chosen is act_remove:
+                self.remove_requested.emit(self._index)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class SwatchBar(QWidget):
+    edit_requested = pyqtSignal(int)
+    remove_requested = pyqtSignal(int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(2)
-        self.setMinimumHeight(22)
+        self.setMinimumHeight(24)
 
     def set_colours(self, palette):
         while self._layout.count():
@@ -283,16 +405,10 @@ class SwatchBar(QWidget):
             w = item.widget()
             if w is not None:
                 w.deleteLater()
-        for r, g, b in palette:
-            chip = QFrame()
-            chip.setFixedHeight(18)
-            chip.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            chip.setToolTip("#{:02x}{:02x}{:02x}  ({}, {}, {})".format(r, g, b, r, g, b))
-            chip.setStyleSheet(
-                "background-color: rgb({},{},{}); border: 1px solid rgba(0,0,0,80);".format(
-                    r, g, b
-                )
-            )
+        for i, rgb in enumerate(palette):
+            chip = SwatchChip(i, rgb)
+            chip.edit_requested.connect(self.edit_requested)
+            chip.remove_requested.connect(self.remove_requested)
             self._layout.addWidget(chip)
 
 
@@ -322,16 +438,26 @@ class Window(QMainWindow):
         self.palette_edit.textChanged.connect(self._on_palette_text_changed)
 
         self.swatches = SwatchBar()
+        self.swatches.edit_requested.connect(self._edit_swatch)
+        self.swatches.remove_requested.connect(self._remove_swatch)
         self.palette_status = QLabel()
 
         pal_label = QLabel("Palette")
-        pal_hint = QLabel("#rrggbb  ·  #rgb  ·  R,G,B  —  one colour per line")
+        pal_hint = QLabel(
+            "#rrggbb  ·  #rgb  ·  R,G,B  —  click a swatch to edit, right-click to remove"
+        )
         pal_hint.setStyleSheet("color: palette(mid);")
 
         self.btn_load = QPushButton("Load image")
         self.btn_go = QPushButton("Palettize")
         self.btn_save = QPushButton("Save result")
         self.btn_reset_pal = QPushButton("Reset palette")
+        self.chk_smooth = QCheckBox("Smooth edges")
+        self.chk_smooth.setChecked(True)
+        self.chk_smooth.setToolTip(
+            "Median + slight blur, then snap back to the palette. "
+            "Cuts speckles and crunchy outlines. Uncheck for a hard posterized look."
+        )
         self.btn_go.setEnabled(False)
         self.btn_save.setEnabled(False)
         self.btn_load.clicked.connect(self.load)
@@ -347,6 +473,7 @@ class Window(QMainWindow):
         buttons.addWidget(self.btn_load)
         buttons.addWidget(self.btn_go)
         buttons.addWidget(self.btn_save)
+        buttons.addWidget(self.chk_smooth)
         buttons.addStretch(1)
         buttons.addWidget(self.btn_reset_pal)
 
@@ -383,6 +510,45 @@ class Window(QMainWindow):
 
     def current_palette(self):
         return parse_palette(self.palette_edit.toPlainText())
+
+    def _set_palette_text(self, text):
+        cursor_pos = self.palette_edit.textCursor().position()
+        self.palette_edit.blockSignals(True)
+        self.palette_edit.setPlainText(text)
+        self.palette_edit.blockSignals(False)
+        cursor = self.palette_edit.textCursor()
+        cursor.setPosition(min(cursor_pos, len(text)))
+        self.palette_edit.setTextCursor(cursor)
+        self._on_palette_text_changed()
+
+    def _edit_swatch(self, index):
+        palette = self.current_palette()
+        if index < 0 or index >= len(palette):
+            return
+        r, g, b = palette[index]
+        colour = QColorDialog.getColor(
+            QColor(r, g, b),
+            self,
+            "Edit palette colour",
+        )
+        if not colour.isValid():
+            return
+        new_rgb = (colour.red(), colour.green(), colour.blue())
+        if new_rgb == (r, g, b):
+            return
+        text = rewrite_palette_colour(
+            self.palette_edit.toPlainText(), index, new_rgb
+        )
+        self._set_palette_text(text)
+
+    def _remove_swatch(self, index):
+        palette = self.current_palette()
+        if index < 0 or index >= len(palette):
+            return
+        text = rewrite_palette_colour(
+            self.palette_edit.toPlainText(), index, None
+        )
+        self._set_palette_text(text)
 
     def _fit(self, pix, label):
         label.setPixmap(
@@ -435,7 +601,11 @@ class Window(QMainWindow):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         QApplication.processEvents()
         try:
-            self.result = palettize(self.original.copy(), palette)
+            self.result = palettize(
+                self.original.copy(),
+                palette,
+                smooth=self.chk_smooth.isChecked(),
+            )
             self._res_pix = pil_to_pixmap(self.result)
             self._fit(self._res_pix, self.lbl_res)
             self.btn_save.setEnabled(True)
